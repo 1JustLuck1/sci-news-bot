@@ -15,7 +15,7 @@ from openai import AsyncOpenAI
 import feedparser
 
 load_dotenv()
-
+#
 logging.basicConfig(
     filename='sci-bot.log',
     level=logging.INFO,
