@@ -1,0 +1,4 @@
+.env
+sci-bot.log
+.venv
+/data
