@@ -34,8 +34,13 @@ OPENALEX_MAILTO = os.getenv("OPENALEX_MAILTO", "")
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:11434/v1")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "ollama")
 LLM_MODEL = os.getenv("LLM_MODEL", "llama3.1:8b")
+
 OPENALEX_API_KEY = os.getenv("OPENALEX_API_KEY","")
 
+PROXY_USER = os.getenv("PROXY_USER","")
+PROXY_PWD = os.getenv("PROXY_PWD","")
+PROXY_IP = os.getenv("PROXY_IP","")
+PROXY_PORT = os.getenv("PROXY_PORT","")
 
 DIGEST_HOUR = int(os.getenv("DIGEST_HOUR", "9"))
 DIGEST_MINUTE = int(os.getenv("DIGEST_MINUTE", "0"))
@@ -170,16 +175,14 @@ def reconstruct_abstract(inverted_index):
     return " ".join(words).strip()
 
 
-async def fetch_openalex(keywords: list[str], limit: int = 5, days: int = 2):
+async def fetch_openalex(keywords: list[str], limit: int = 5, days: int = 7):
     url = "https://api.openalex.org/works"
     since = dt.date.today() - dt.timedelta(days=days)
 
     params = {
-        "filter": f"from_created_date:{since.isoformat()}",
-        "sort": "publication_date",
-        "order": "desc",
-        "per-page": min(max(limit, 1), 25),
-        "api_key": OPENALEX_API_KEY
+        "api_key": OPENALEX_API_KEY,
+        "sort": "publication_date:desc",
+        "per-page": limit,   
     }
 
     # if OPENALEX_MAILTO:
@@ -247,7 +250,7 @@ async def fetch_semantic_scholar(query: str, limit: int = 5):
     params = {
         "query": query,
         "fields": "title,abstract,url,publicationDate,externalIds",
-        "limit": min(limit, 20),
+        "limit": limit,
     }
 
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -330,6 +333,7 @@ async def cmd_start(message: types.Message):
     await ensure_user(message.chat.id)
     await message.answer(
         "Привет! Я бот для дайджеста научных статей.\n\n"
+        "Дайджест присылаю в 9:00 по МСК.\n"
         "Задайте ключевые слова командой:\n"
         "/set machine learning, genomics, LLM agents\n\n"
         "Полезные команды:\n"
@@ -393,30 +397,31 @@ async def cmd_test(message: types.Message):
         )
         full_list.extend(items_oa)
     except Exception as e:
-        logger.exception("[openalex] Ошибка получения статей")
-        await message.answer(f"[openalex] Ошибка источника статей: {e}")
+        logger.exception(f"[openalex] Ошибка получения статей: {e}")
+        await message.answer(f"[openalex] Ошибка источника статей!")
 
-    await asyncio.sleep(5)
+    for kw in keywords:
+        try:
+            items_arx = await fetch_arxiv(
+                query=kw,
+            )
+            full_list.extend(items_arx)
+        except Exception as e:
+            logger.exception(f"[arxiv] Ошибка получения статей: {e}")
+            await message.answer(f"[arxiv] Ошибка источника статей!")
+            return
 
-    try:
-        items_arx = await fetch_arxiv(
-            query=keywords,
-        )
-        full_list.extend(items_arx)
-    except Exception as e:
-        logger.exception("[arxiv] Ошибка получения статей")
-        await message.answer(f"[arxiv] Ошибка источника статей: {e}")
-        return
+        await asyncio.sleep(5)
 
-    try:
-        items_ss = await fetch_semantic_scholar(
-            query=keywords,
-            limit=1,
-        )
-        full_list.extend(items_ss)
-    except Exception as e:
-        logger.exception("[semantic scholar] Ошибка получения статей")
-        await message.answer(f"[semanticscholar] Ошибка источника статей: {e}")
+    # try:
+    #     items_ss = await fetch_semantic_scholar(
+    #         query=keywords,
+    #         limit=1,
+    #     )
+    #     full_list.extend(items_ss)
+    # except Exception as e:
+    #     logger.exception(f"[semantic scholar] Ошибка получения статей: {e}")
+    #     await message.answer(f"[semanticscholar] Ошибка источника статей!")
 
 
     if not full_list:
@@ -426,7 +431,7 @@ async def cmd_test(message: types.Message):
         )
         return
 
-    for item in full_list[:2]:
+    for item in full_list:
         summary = await summarize(item["title"], item["abstract"])
         await message.answer(
             format_item(item, summary),
@@ -438,33 +443,39 @@ async def cmd_test(message: types.Message):
 
 async def send_digest_to_user(bot: Bot, chat_id: int, keywords_raw: str):
     keywords = [k.strip() for k in keywords_raw.split(",") if k.strip()]
+    full_list = []
 
     if not keywords:
         return
     
-    # try:
-    #     items = await fetch_openalex(
-    #         keywords=keywords,
-    #         limit=ARTICLES_PER_USER * 3,
-    #         days=SEARCH_DAYS
-    #     )
-    # except Exception as e:
-    #     logger.warning("Ошибка получения статей для %s: %s", chat_id, e)
-    #     return
+    try:
+        items_oa = await fetch_openalex(
+            keywords=keywords,
+            limit=ARTICLES_PER_USER * 3,
+            days=SEARCH_DAYS
+        )
+        full_list.extend(items_oa)
+    except Exception as e:
+        logger.warning("Ошибка получения статей для %s: %s", chat_id, e)
+        return
+    
     for kw in keywords:
         try:
-            items = await fetch_arxiv(
+            items_ax = await fetch_arxiv(
                 query=kw,
             )
+            full_list.extend(items_ax)
+            #await asyncio.sleep(5)
         except Exception as e:
             logger.exception("[arxiv] Ошибка получения статей")
+            await asyncio.sleep(5)
             return
         
         await asyncio.sleep(5) 
 
     sent = 0
 
-    for item in items:
+    for item in full_list:
         if sent >= ARTICLES_PER_USER:
             break
 
@@ -534,9 +545,11 @@ async def main():
     # connector = ProxyConnector.from_url("socks5://sciproxyuser:6F:A4oY5Ah8v}WA@195.135.253.9:1080")
     # bot = Bot(token=BOT_TOKEN, session=AiohttpSession(connector=connector))
 
-    session = AiohttpSession("socks5://sciproxyuser:6F:A4oY5Ah8v}WA@195.135.253.9:1080")
-    bot = Bot(token=BOT_TOKEN, session=session)
-
+    session = AiohttpSession(f"socks5://{PROXY_USER}:{PROXY_PWD}@{PROXY_IP}:{PROXY_PORT}")
+    if PROXY_USER: 
+        bot = Bot(token=BOT_TOKEN, session=session)
+    else:
+        bot = Bot(token=BOT_TOKEN)
 
     #bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()
